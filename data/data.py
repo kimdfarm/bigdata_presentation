@@ -17,7 +17,7 @@ VALUABLE_EVENTS = {
     'PushEvent'           # 푸시 (개발 활성도)
 }
 
-output_file_path = f"data/refined_ghdata_{YEAR}_{MONTH}.json"
+output_file_path = f"F:\\data\\df_{YEAR}_{MONTH}.json"
 
 print(f"🚀 {YEAR}년 {MONTH}월 GH Archive 데이터 정제 시작...")
 
@@ -25,9 +25,9 @@ print(f"🚀 {YEAR}년 {MONTH}월 GH Archive 데이터 정제 시작...")
 with open(output_file_path, "w", encoding="utf-8") as out_f:
     
     # 2. 1일부터 31일까지 반복
-    for day in range(1, DAYS_IN_MONTH + 1):
+    for day in range(1): #,  DAYS_IN_MONTH + 1):
         day_str = f"{day:02d}"
-        
+        day_str = "01" # 테스트용으로 1일만 처리하도록 고정 (실제 실행 시에는 위의 주석 제거)
         # 3. 0시부터 23시까지 반복
         for hour in range(24):
             hour_str = f"{hour:02d}"
@@ -47,9 +47,9 @@ with open(output_file_path, "w", encoding="utf-8") as out_f:
                             event = json.loads(line.decode('utf-8'))
                             
                             # [필터 1] 가치 없는 이벤트 유형은 패스
-                            event_type = event.get('type')
-                            if event_type not in VALUABLE_EVENTS:
-                                continue
+                            # event_type = event.get('type')
+                            # if event_type not in VALUABLE_EVENTS:
+                            #     continue
                                 
                             # [필터 2] 봇(Bot)이 유발한 자동화 이벤트는 패스
                             actor_name = event.get('actor', {}).get('login', '').lower()
@@ -62,9 +62,9 @@ with open(output_file_path, "w", encoding="utf-8") as out_f:
                             # 정제된 핵심 데이터만 추출하여 딕셔너리 재구성 (용량 추가 다이어트)
                             refined_event = {
                                 "id": event.get("id"),
-                                "type": event_type,
-                                "actor": event.get("actor", {}).get("login"),
-                                "repo": event.get("repo", {}).get("name"),
+                                "type": event.get("type"),
+                                "actor": event.get("actor"), #, {}).get("login"),
+                                "repo": event.get("repo"), # {}).get("name"),
                                 "created_at": event.get("created_at"),
                                 "payload": event.get("payload") # 상세 정보가 필요 없다면 이 부분을 제외하면 용량이 엄청나게 줄어듭니다.
                             }
