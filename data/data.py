@@ -2,84 +2,104 @@ import requests
 import gzip
 import json
 import os
+import time
+from concurrent.futures import ThreadPoolExecutor
+import threading
+from requests.adapters import HTTPAdapter
+from urllib3.util import Retry
 
-# 1. 수집 및 필터링 설정
+# 1. 설정
 YEAR = "2026"
 MONTH = "05"
-DAYS_IN_MONTH = 31  # 5월은 31일까지 있습니다.
+DAYS_IN_MONTH = 31
 
-# 가치 있는 핵심 이벤트 유형만 정의 (나머지는 버림)
-VALUABLE_EVENTS = {
-    'WatchEvent',         # Star (트렌드 분석 핵심)
-    'ForkEvent',          # 포크 (확산도 분석)
-    'PullRequestEvent',   # PR (코드 기여도)
-    'IssueCommentEvent',  # 이슈 댓글 (개발자 자연어 대화 데이터)
-    'PushEvent'           # 푸시 (개발 활성도)
-}
+output_file_path = f"data\\df_{YEAR}_{MONTH}.json"
+os.makedirs(os.path.dirname(output_file_path), exist_ok=True)
+file_lock = threading.Lock()
 
-output_file_path = f"F:\\data\\df_{YEAR}_{MONTH}.json"
+# 💡 [핵심 조치 1] 속도 조절
+# i9 성능이 아깝지만, 서버 차단을 피하려면 동시 요청을 8~12개 정도로 낮추는 것이 결국 가장 빠릅니다.
+MAX_WORKERS = 8 
 
-print(f"🚀 {YEAR}년 {MONTH}월 GH Archive 데이터 정제 시작...")
-
-# 결과를 저장할 파일 열기
-with open(output_file_path, "w", encoding="utf-8") as out_f:
+def create_retry_session():
+    """네트워크 불안정 및 서버 차단을 극복하기 위한 스마트 재시도 세션 생성"""
+    session = requests.Session()
     
-    # 2. 1일부터 31일까지 반복
-    for day in range(1): #,  DAYS_IN_MONTH + 1):
-        day_str = f"{day:02d}"
-        day_str = "01" # 테스트용으로 1일만 처리하도록 고정 (실제 실행 시에는 위의 주석 제거)
-        # 3. 0시부터 23시까지 반복
-        for hour in range(24):
-            hour_str = f"{hour:02d}"
-            
-            # GH Archive 타겟 URL 생성
-            url = f"https://data.gharchive.org/{YEAR}-{MONTH}-{day_str}-{hour}.json.gz"
-            print(f"📦 다운로드 및 분석 중: {YEAR}-{MONTH}-{day_str}-{hour_str}.json.gz")
-            
-            try:
-                # 스트리밍 방식으로 파일 다운로드
-                response = requests.get(url, stream=True, timeout=30)
-                
-                if response.status_code == 200:
-                    # 다운로드와 동시에 메모리에서 gzip 압축 해제
-                    with gzip.GzipFile(fileobj=response.raw) as f:
-                        for line in f:
-                            event = json.loads(line.decode('utf-8'))
-                            
-                            # [필터 1] 가치 없는 이벤트 유형은 패스
-                            # event_type = event.get('type')
-                            # if event_type not in VALUABLE_EVENTS:
-                            #     continue
-                                
-                            # [필터 2] 봇(Bot)이 유발한 자동화 이벤트는 패스
-                            actor_name = event.get('actor', {}).get('login', '').lower()
-                            if 'bot' in actor_name or '[bot]' in actor_name:
-                                continue
-                            
-                            # [필터 3] PR의 경우 가급적 머지(Merged)된 알짜배기만 남기거나 본문 활용
-                            # 필요에 따라 payload 내부를 한 번 더 정제할 수 있습니다.
-                            
-                            # 정제된 핵심 데이터만 추출하여 딕셔너리 재구성 (용량 추가 다이어트)
-                            refined_event = {
-                                "id": event.get("id"),
-                                "type": event.get("type"),
-                                "actor": event.get("actor"), #, {}).get("login"),
-                                "repo": event.get("repo"), # {}).get("name"),
-                                "created_at": event.get("created_at"),
-                                "payload": event.get("payload") # 상세 정보가 필요 없다면 이 부분을 제외하면 용량이 엄청나게 줄어듭니다.
-                            }
-                            
-                            # 파일에 한 줄씩 JSON으로 저장 (JSON Lines 포맷)
-                            out_f.write(json.dumps(refined_event, ensure_ascii=False) + "\n")
-                            
-                elif response.status_code == 404:
-                    # 아직 생성되지 않은 미래의 시간이거나 없는 파일인 경우
-                    print(f"⚠️ 파일을 찾을 수 없습니다 (404): {url}")
-                else:
-                    print(f"❌ 에러 발생 (상태코드 {response.status_code}): {url}")
+    # 💡 [핵심 조치 2] 지수 백오프(Exponential Backoff) 설정
+    # 500, 502, 503, 504 서버 에러 및 타임아웃 시 자동 재시도
+    # backoff_factor=2 설정으로 인해 에러 발생 시 [2초, 4초, 8초...] 쉬었다가 재시도합니다.
+    retries = Retry(
+        total=5,  # 최대 5번 재시도
+        backoff_factor=2, 
+        status_forcelist=[500, 502, 503, 504],
+        raise_on_status=False
+    )
+    
+    # 세션에 재시도 로직 적용
+    adapter = HTTPAdapter(max_retries=retries)
+    session.mount('http://', adapter)
+    session.mount('https://', adapter)
+    return session
+
+print(f"🚀 {YEAR}년 {MONTH}월 GH Archive 스마트 멀티스레드 정제 시작...")
+
+def process_hour(day, hour):
+    day_str = f"{day:02d}"
+    hour_str = f"{hour:02d}"
+    url = f"https://data.gharchive.org/{YEAR}-{MONTH}-{day_str}-{hour}.json.gz"
+    
+    # 스레드별 독립된 재시도 세션 사용
+    session = create_retry_session()
+    
+    try:
+        # 💡 연결 타임아웃은 15초, 읽기 타임아웃은 60초로 넉넉하게 설정
+        response = session.get(url, stream=True, timeout=(1500, 6000))
+        print("📦 ",day,"일 " ,hour,"시간 탐색 중")
+        if response.status_code == 200:
+            local_buffer = []
+            with gzip.GzipFile(fileobj=response.raw) as f:
+                for line in f:
+                    event = json.loads(line.decode('utf-8'))
                     
-            except Exception as e:
-                print(f"💥 네트워크 또는 파싱 에러 발생: {e}")
-                continue
+                    # 봇 필터
+                    actor_name = event.get('actor', {}).get('login', '').lower()
+                    if 'bot' in actor_name or '[bot]' in actor_name:
+                        continue
+                    
+                    refined_event = {
+                        "id": event.get("id"),
+                        "type": event.get("type"),
+                        "actor": event.get("actor", {}).get("login"),
+                        "repo": event.get("repo", {}).get("name"),
+                        "created_at": event.get("created_at"),
+                        "payload": event.get("payload")
+                    }
+                    local_buffer.append(json.dumps(refined_event, ensure_ascii=False) + "\n")
+            
+            if local_buffer:
+                with file_lock:
+                    with open(output_file_path, "a", encoding="utf-8") as out_f:
+                        out_f.writelines(local_buffer)
+            
+            print(f"✅ 완료: {YEAR}-{MONTH}-{day_str}-{hour_str}.json.gz")
+            
+        elif response.status_code == 404:
+            print(f"⚠️ 파일을 찾을 수 없습니다 (404): {url}")
+        else:
+            print(f"❌ 서버 응답 에러 (상태코드 {response.status_code}): {url}")
+            
+    except Exception as e:
+        # 세션 재시도까지 모두 실패했을 때만 최종 에러 출력
+        print(f"💥 최종 실패 [{day_str}일 {hour_str}시]: {e}")
+
+# 2. 작업 리스트 생성 (예시로 1일치 설정)
+tasks = []
+for day in range(1, 29): 
+    for hour in range(24):
+        tasks.append((day, hour))
+
+# 3. 멀티스레드 실행
+with ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
+    executor.map(lambda p: process_hour(*p), tasks)
 
 print(f"🎉 모든 정제가 완료되었습니다! 결과 파일: {output_file_path}")
