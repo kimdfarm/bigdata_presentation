@@ -94,7 +94,7 @@ def process_hour(day, hour):
 
 # 2. 작업 리스트 생성 (예시로 1일치 설정)
 tasks = []
-for day in range(1, 29): 
+for day in range(1, 2): 
     for hour in range(24):
         tasks.append((day, hour))
 
